@@ -1,0 +1,97 @@
+# One command to run the whole system:  docker compose up
+#
+# Note what the `worker` service does NOT have: a `ports` mapping. It cannot
+# receive an HTTP request at all. That is the assignment's "background processing
+# must not depend on keeping an HTTP request alive", enforced by the topology
+# rather than by convention.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: payroll
+      POSTGRES_PASSWORD: payroll
+      POSTGRES_DB: payroll
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Nothing that depends on the database starts until this passes, so we
+      # never get the "connection refused on boot" race.
+      test: ['CMD-SHELL', 'pg_isready -U payroll -d payroll']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
+    command: node dist/main
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://payroll:payroll@postgres:5432/payroll
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PROVIDER_FAILURE_RATE: 0.3
+      PROVIDER_LATENCY_MS: 1500
+      JOB_ATTEMPTS: 5
+      JOB_BACKOFF_MS: 1000
+      WORKER_CONCURRENCY: 5
+      STUCK_EVENT_TIMEOUT_MS: 120000
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--spider', '-q', 'http://localhost:3000/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
+    command: node dist/worker.main
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://payroll:payroll@postgres:5432/payroll
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PROVIDER_FAILURE_RATE: 0.3
+      PROVIDER_LATENCY_MS: 1500
+      JOB_ATTEMPTS: 5
+      JOB_BACKOFF_MS: 1000
+      WORKER_CONCURRENCY: 5
+      STUCK_EVENT_TIMEOUT_MS: 120000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Give an in-flight job time to finish before the container is killed.
+    stop_grace_period: 30s
+    # Scale it to prove multi-worker correctness:
+    #   docker compose up --scale worker=3
+    deploy:
+      replicas: 1
+
+volumes:
+  postgres-data:
