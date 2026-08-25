@@ -64,6 +64,61 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
+  # Guards against the most common TypeORM mistake: editing an entity and
+  # forgetting the migration. The schema in migrations must fully describe the
+  # entities, or `migration:generate` would have something to write.
+  migration:
+    runs-on: ubuntu-latest
+    needs: quality
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: payroll
+          POSTGRES_PASSWORD: payroll
+          POSTGRES_DB: payroll
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payroll -d payroll"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://payroll:payroll@localhost:5432/payroll
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Proves the migration actually applies to an empty database, not just
+      # that a file exists.
+      - name: Apply migrations
+        run: npm run migration:run
+        working-directory: apps/backend
+
+      - name: Fail if entities and migrations disagree
+        working-directory: apps/backend
+        run: |
+          set +e
+          output=$(npm run migration:generate -- src/database/migrations/DriftCheck 2>&1)
+          set -e
+          echo "$output"
+          # typeorm exits 1 both when there is nothing to generate and when it
+          # cannot connect, so match the message rather than the exit code.
+          if echo "$output" | grep -q "No changes in database schema were found"; then
+            echo "Entities and migrations are in sync."
+          else
+            echo "::error::Entity changes are missing a migration. Run npm run migration:generate."
+            exit 1
+          fi
+
   # Deliberately not `needs: quality`. A broken Dockerfile is an independent
   # failure from a lint error, and we want both reported in the same run
   # instead of discovering the second one only after fixing the first.
