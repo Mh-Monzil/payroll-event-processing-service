@@ -1,0 +1,4 @@
+export enum FailureKind {
+  PERMANENT = 'PERMANENT',
+  RETRIES_EXHAUSTED = 'RETRIES_EXHAUSTED',
+}

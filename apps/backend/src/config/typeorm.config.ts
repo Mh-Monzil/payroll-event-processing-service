@@ -9,7 +9,7 @@ export default new DataSource({
   type: 'postgres',
   url:
     process.env.DATABASE_URL ??
-    'postgres://payroll:payroll@localhost:5432/payroll',
+    'postgres://payroll:payroll@localhost:5433/payroll',
   synchronize: false,
   logging: process.env.DATABASE_LOGGING === 'true',
   entities: [join(__dirname, '..', 'modules', '**', `*.entity${ext}`)],
