@@ -1,0 +1,28 @@
+{
+  "name": "payroll-event-processing-service",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Payroll event processing service — NestJS + TypeORM + BullMQ",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w backend",
+    "typecheck": "npm run typecheck -w backend",
+    "lint": "npm run lint -w backend",
+    "format:check": "npm run format:check -w backend",
+    "test": "npm run test -w backend",
+    "start:api": "npm run start:dev -w backend",
+    "start:worker": "npm run start:worker:dev -w backend",
+    "migration:generate": "npm run migration:generate -w backend",
+    "migration:run": "npm run migration:run -w backend",
+    "migration:revert": "npm run migration:revert -w backend",
+    "migration:show": "npm run migration:show -w backend",
+    "seed": "npm run seed -w backend",
+    "infra:up": "docker compose up -d postgres redis",
+    "infra:down": "docker compose down"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
