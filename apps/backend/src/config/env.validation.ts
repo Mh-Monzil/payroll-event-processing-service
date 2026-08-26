@@ -67,6 +67,12 @@ export class EnvironmentVariables {
   @Min(1)
   WORKER_CONCURRENCY = 5;
 
+  /** How long a job waits before re-checking whether it may run yet. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(50)
+  ORDERING_DEFER_MS = 500;
+
   /** How long an event may sit in PROCESSING before reconciliation reclaims it. */
   @Type(() => Number)
   @IsInt()

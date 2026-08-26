@@ -8,6 +8,8 @@ import { EmployeePayrollState } from '../payroll-state/entities/employee-payroll
 import { PayrollApplication } from './entities/payroll-application.entity';
 import { PayrollEventProcessor } from './payroll-event.processor';
 import { PayrollProviderService } from './provider/payroll-provider.service';
+import { EmployeeLockService } from './ordering/employee-lock.service';
+import { OrderingGateService } from './ordering/ordering-gate.service';
 
 @Module({
   imports: [
@@ -20,6 +22,11 @@ import { PayrollProviderService } from './provider/payroll-provider.service';
     QueueModule,
     EventsModule,
   ],
-  providers: [PayrollEventProcessor, PayrollProviderService],
+  providers: [
+    PayrollEventProcessor,
+    PayrollProviderService,
+    EmployeeLockService,
+    OrderingGateService,
+  ],
 })
 export class ProcessingModule {}
