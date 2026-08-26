@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { InjectQueue } from '@nestjs/bullmq';
+import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
 import {
   DataSource,
   FindOptionsWhere,
@@ -9,12 +12,18 @@ import {
 import { CustomLogger } from '../../shared/services/custom-logger.service';
 import { ProcessingTag } from '../../common/enums/logging-tag.enum';
 import { PaginatedData } from '../../common/interfaces/api-response.interface';
+import {
+  PAYROLL_QUEUE,
+  PROCESS_EVENT_JOB,
+  createJobOptions,
+} from '../../config/queue.config';
 import { EventStatusHistory } from './entities/event-status-history.entity';
 import { PayrollEvent } from './entities/payroll-event.entity';
 import { EventStatus } from './enums/event-status.enum';
 import { SubmitEventDto } from './dto/submit-event.dto';
 import { ListEventsQueryDto } from './dto/list-events.query.dto';
 import { resolveIdempotencyKey } from './idempotency';
+import { EventStateService } from './event-state.service';
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -28,7 +37,11 @@ export class EventsService {
   constructor(
     @InjectRepository(PayrollEvent)
     private readonly events: Repository<PayrollEvent>,
+    @InjectQueue(PAYROLL_QUEUE)
+    private readonly queue: Queue,
     private readonly dataSource: DataSource,
+    private readonly state: EventStateService,
+    private readonly configService: ConfigService,
     private readonly logger: CustomLogger,
   ) {}
 
@@ -78,6 +91,8 @@ export class EventsService {
         sequence: event.sequence,
       });
 
+      await this.enqueue(event);
+
       return { event, duplicate: false };
     } catch (error) {
       if (this.isUniqueViolation(error)) {
@@ -87,6 +102,30 @@ export class EventsService {
         return this.replay(existing);
       }
       throw error;
+    }
+  }
+
+  async enqueue(event: PayrollEvent): Promise<void> {
+    try {
+      await this.queue.add(
+        PROCESS_EVENT_JOB,
+        { eventId: event.id },
+        {
+          ...createJobOptions(this.configService),
+          jobId: event.id,
+        },
+      );
+
+      await this.state.transition(event, EventStatus.QUEUED, {
+        queuedAt: new Date(),
+        message: 'Queued for processing',
+      });
+    } catch (error) {
+      this.logger.errorWithTag(
+        ProcessingTag.PROCESSING_DEFERRED,
+        `Could not queue event ${event.id}; it stays PENDING for reconciliation`,
+        error,
+      );
     }
   }
 
