@@ -5,6 +5,10 @@ export const PAYROLL_QUEUE = 'payroll-events';
 
 export const PROCESS_EVENT_JOB = 'process-event';
 
+export interface ProcessEventJobData {
+  eventId: string;
+}
+
 export const createJobOptions = (
   configService: ConfigService,
 ): JobsOptions => ({

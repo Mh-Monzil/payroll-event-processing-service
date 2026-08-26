@@ -1,4 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
+import { EventStateService } from '../../src/modules/events/event-state.service';
 import {
   DataSource,
   EntityManager,
@@ -35,6 +38,9 @@ describe('EventsService', () => {
   };
   let manager: { create: jest.Mock; save: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  let queue: { add: jest.Mock };
+  let state: { transition: jest.Mock };
+  let logger: { logWithTag: jest.Mock; errorWithTag: jest.Mock };
   let service: EventsService;
 
   beforeEach(() => {
@@ -57,10 +63,17 @@ describe('EventsService', () => {
       ),
     };
 
+    queue = { add: jest.fn() };
+    state = { transition: jest.fn() };
+    logger = { logWithTag: jest.fn(), errorWithTag: jest.fn() };
+
     service = new EventsService(
       repository as unknown as Repository<PayrollEvent>,
+      queue as unknown as Queue,
       dataSource as unknown as DataSource,
-      { logWithTag: jest.fn() } as unknown as CustomLogger,
+      state as unknown as EventStateService,
+      { get: jest.fn(() => 5) } as unknown as ConfigService,
+      logger as unknown as CustomLogger,
     );
   });
 
@@ -78,6 +91,36 @@ describe('EventsService', () => {
         status: EventStatus.PENDING,
       }),
     );
+  });
+
+  it('queues the job under the event id so a re-queue cannot duplicate it', async () => {
+    repository.findOne.mockResolvedValue(null);
+
+    await service.submit(submission);
+
+    expect(queue.add).toHaveBeenCalledWith(
+      expect.any(String),
+      { eventId: 'new-event-id' },
+      expect.objectContaining({ jobId: 'new-event-id' }),
+    );
+    expect(state.transition).toHaveBeenCalledWith(
+      expect.anything(),
+      EventStatus.QUEUED,
+      expect.anything(),
+    );
+  });
+
+  // The event is committed before this point, so losing Redis must cost a delay
+  // rather than the submission.
+  it('still accepts the event when the queue is unreachable', async () => {
+    repository.findOne.mockResolvedValue(null);
+    queue.add.mockRejectedValue(new Error('redis down'));
+
+    const result = await service.submit(submission);
+
+    expect(result.duplicate).toBe(false);
+    expect(state.transition).not.toHaveBeenCalled();
+    expect(logger.errorWithTag).toHaveBeenCalled();
   });
 
   it('returns the original event instead of writing a second one', async () => {
