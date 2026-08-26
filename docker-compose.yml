@@ -120,5 +120,17 @@ services:
     deploy:
       replicas: 1
 
+  # Static bundle behind nginx, which also proxies /api to the api service, so
+  # the browser only ever talks to one origin.
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+    ports:
+      - '5173:80'
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres-data:
