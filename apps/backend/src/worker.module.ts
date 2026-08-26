@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { DatabaseModule } from './database/database.module';
 import { RedisModule } from './shared/redis/redis.module';
 import { QueueModule } from './shared/queue/queue.module';
@@ -14,6 +15,7 @@ import { validateEnv } from './config/env.validation';
       envFilePath: ['.env.local', '.env', '../../.env'],
       validate: validateEnv,
     }),
+    ScheduleModule.forRoot(),
     DatabaseModule,
     RedisModule,
     QueueModule,

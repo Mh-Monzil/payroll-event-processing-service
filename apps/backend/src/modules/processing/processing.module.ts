@@ -10,6 +10,7 @@ import { PayrollEventProcessor } from './payroll-event.processor';
 import { PayrollProviderService } from './provider/payroll-provider.service';
 import { EmployeeLockService } from './ordering/employee-lock.service';
 import { OrderingGateService } from './ordering/ordering-gate.service';
+import { ReconciliationService } from './reconciliation.service';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { OrderingGateService } from './ordering/ordering-gate.service';
     PayrollProviderService,
     EmployeeLockService,
     OrderingGateService,
+    ReconciliationService,
   ],
 })
 export class ProcessingModule {}
