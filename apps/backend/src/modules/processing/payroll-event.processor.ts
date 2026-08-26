@@ -1,7 +1,7 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Job, UnrecoverableError } from 'bullmq';
+import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import { DataSource, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { CustomLogger } from '../../shared/services/custom-logger.service';
@@ -23,12 +23,21 @@ import {
 } from './provider/payroll-provider.service';
 import { getEventHandler } from './handlers/event-handler.registry';
 import { classifyFailure } from './failure-classifier';
+import {
+  LOCK_BUSY,
+  EmployeeLockService,
+} from './ordering/employee-lock.service';
+import { OrderingGateService } from './ordering/ordering-gate.service';
 
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 5);
 
 export interface ProcessEventOutcome {
   outcome: 'applied' | 'already-applied' | 'already-settled';
   externalRef?: string;
+}
+
+interface Deferral {
+  deferredBecause: string;
 }
 
 @Processor(PAYROLL_QUEUE, { concurrency: CONCURRENCY })
@@ -45,13 +54,18 @@ export class PayrollEventProcessor extends WorkerHost {
     private readonly dataSource: DataSource,
     private readonly provider: PayrollProviderService,
     private readonly state: EventStateService,
+    private readonly lock: EmployeeLockService,
+    private readonly gate: OrderingGateService,
     private readonly configService: ConfigService,
     private readonly logger: CustomLogger,
   ) {
     super();
   }
 
-  async process(job: Job<ProcessEventJobData>): Promise<ProcessEventOutcome> {
+  async process(
+    job: Job<ProcessEventJobData>,
+    token?: string,
+  ): Promise<ProcessEventOutcome> {
     const attempt = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts ?? 1;
 
@@ -64,6 +78,37 @@ export class PayrollEventProcessor extends WorkerHost {
         `Event ${job.data.eventId} no longer exists`,
       );
     }
+
+    if (TERMINAL_STATUSES.includes(event.status)) {
+      return { outcome: 'already-settled' };
+    }
+
+    const result = await this.lock.runExclusively(event.employeeId, () =>
+      this.processHoldingLock(event.id, attempt, maxAttempts),
+    );
+
+    if (result === LOCK_BUSY) {
+      return this.defer(
+        job,
+        token,
+        event,
+        `another worker is processing ${event.employeeId}`,
+      );
+    }
+
+    if ('deferredBecause' in result) {
+      return this.defer(job, token, event, result.deferredBecause);
+    }
+
+    return result;
+  }
+
+  private async processHoldingLock(
+    eventId: string,
+    attempt: number,
+    maxAttempts: number,
+  ): Promise<ProcessEventOutcome | Deferral> {
+    const event = await this.events.findOneOrFail({ where: { id: eventId } });
 
     if (TERMINAL_STATUSES.includes(event.status)) {
       return { outcome: 'already-settled' };
@@ -87,6 +132,13 @@ export class PayrollEventProcessor extends WorkerHost {
       return {
         outcome: 'already-applied',
         externalRef: applied.externalRef ?? undefined,
+      };
+    }
+
+    const blocker = await this.gate.blockingPredecessor(event);
+    if (blocker) {
+      return {
+        deferredBecause: `event ${blocker.id} (sequence ${blocker.sequence}, ${blocker.status}) was accepted first`,
       };
     }
 
@@ -277,6 +329,26 @@ export class PayrollEventProcessor extends WorkerHost {
     );
 
     throw new UnrecoverableError(failure.message);
+  }
+
+  private async defer(
+    job: Job<ProcessEventJobData>,
+    token: string | undefined,
+    event: PayrollEvent,
+    reason: string,
+  ): Promise<never> {
+    this.logger.warnWithTag(
+      ProcessingTag.PROCESSING_DEFERRED,
+      'Processing deferred',
+      { eventId: event.id, employeeId: event.employeeId, reason },
+    );
+
+    await job.moveToDelayed(Date.now() + this.deferDelay(), token);
+    throw new DelayedError();
+  }
+
+  private deferDelay(): number {
+    return Number(this.configService.get<number>('ORDERING_DEFER_MS', 500));
   }
 
   private backoffDelay(attempt: number): number {

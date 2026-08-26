@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { Job, UnrecoverableError } from 'bullmq';
+import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { CustomLogger } from '../../src/shared/services/custom-logger.service';
 import {
@@ -19,6 +19,11 @@ import { Employee } from '../../src/modules/payroll-state/entities/employee.enti
 import { EmployeePayrollState } from '../../src/modules/payroll-state/entities/employee-payroll-state.entity';
 import { PayrollApplication } from '../../src/modules/processing/entities/payroll-application.entity';
 import { PayrollEventProcessor } from '../../src/modules/processing/payroll-event.processor';
+import {
+  LOCK_BUSY,
+  EmployeeLockService,
+} from '../../src/modules/processing/ordering/employee-lock.service';
+import { OrderingGateService } from '../../src/modules/processing/ordering/ordering-gate.service';
 import { PayrollProviderService } from '../../src/modules/processing/provider/payroll-provider.service';
 
 const EVENT_ID = 'a0000000-0000-4000-8000-000000000001';
@@ -34,12 +39,15 @@ const pendingEvent = (): PayrollEvent =>
     attemptCount: 0,
   }) as unknown as PayrollEvent;
 
-const job = (attemptsMade = 0, attempts = 5): Job<ProcessEventJobData> =>
+type TestJob = Job<ProcessEventJobData> & { moveToDelayed: jest.Mock };
+
+const job = (attemptsMade = 0, attempts = 5): TestJob =>
   ({
     data: { eventId: EVENT_ID },
     attemptsMade,
     opts: { attempts },
-  }) as Job<ProcessEventJobData>;
+    moveToDelayed: jest.fn(),
+  }) as unknown as TestJob;
 
 interface RecordedTransition {
   status: EventStatus;
@@ -48,7 +56,9 @@ interface RecordedTransition {
 }
 
 describe('PayrollEventProcessor', () => {
-  let events: { findOne: jest.Mock };
+  let events: { findOne: jest.Mock; findOneOrFail: jest.Mock };
+  let lock: { runExclusively: jest.Mock };
+  let gate: { blockingPredecessor: jest.Mock };
   let applications: { findOne: jest.Mock };
   let employees: { findOne: jest.Mock };
   let states: { findOne: jest.Mock };
@@ -63,7 +73,10 @@ describe('PayrollEventProcessor', () => {
     transitions.find((entry) => entry.status === status);
 
   beforeEach(() => {
-    events = { findOne: jest.fn().mockResolvedValue(pendingEvent()) };
+    events = {
+      findOne: jest.fn().mockResolvedValue(pendingEvent()),
+      findOneOrFail: jest.fn().mockResolvedValue(pendingEvent()),
+    };
     applications = { findOne: jest.fn().mockResolvedValue(null) };
     employees = {
       findOne: jest.fn().mockResolvedValue({ id: 'EMP-001', active: true }),
@@ -109,6 +122,13 @@ describe('PayrollEventProcessor', () => {
       },
     };
 
+    lock = {
+      runExclusively: jest.fn((_employeeId: string, work: () => unknown) =>
+        work(),
+      ),
+    };
+    gate = { blockingPredecessor: jest.fn().mockResolvedValue(null) };
+
     processor = new PayrollEventProcessor(
       events as unknown as Repository<PayrollEvent>,
       applications as unknown as Repository<PayrollApplication>,
@@ -117,6 +137,8 @@ describe('PayrollEventProcessor', () => {
       dataSource as unknown as DataSource,
       provider as unknown as PayrollProviderService,
       state as EventStateService,
+      lock as unknown as EmployeeLockService,
+      gate as unknown as OrderingGateService,
       { get: jest.fn(() => 1000) } as unknown as ConfigService,
       {
         logWithTag: jest.fn(),
@@ -192,6 +214,58 @@ describe('PayrollEventProcessor', () => {
 
       expect(manager.upsert).not.toHaveBeenCalled();
       expect(transitionTo(EventStatus.SUCCEEDED)).toBeDefined();
+    });
+  });
+
+  describe('ordering', () => {
+    // Waiting for a turn is not a failure, so it must not burn an attempt:
+    // moveToDelayed puts the job back, DelayedError says "rescheduled".
+    it('reschedules instead of waiting when another worker holds the employee', async () => {
+      lock.runExclusively.mockResolvedValue(LOCK_BUSY);
+      const moveToDelayed = jest.fn();
+      const pending = { ...job(), moveToDelayed } as TestJob;
+
+      await expect(processor.process(pending, 'token')).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+
+      expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'token');
+      expect(provider.apply).not.toHaveBeenCalled();
+      expect(transitions).toHaveLength(0);
+    });
+
+    it('reschedules while an earlier event for the employee is unsettled', async () => {
+      gate.blockingPredecessor.mockResolvedValue({
+        id: 'earlier-event',
+        sequence: '4',
+        status: EventStatus.AWAITING_RETRY,
+      });
+      const moveToDelayed = jest.fn();
+      const pending = { ...job(), moveToDelayed } as TestJob;
+
+      await expect(processor.process(pending)).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+
+      expect(moveToDelayed).toHaveBeenCalled();
+      expect(provider.apply).not.toHaveBeenCalled();
+      expect(transitionTo(EventStatus.PROCESSING)).toBeUndefined();
+    });
+
+    it('processes normally when nothing earlier is outstanding', async () => {
+      const outcome = await processor.process(job());
+
+      expect(gate.blockingPredecessor).toHaveBeenCalled();
+      expect(outcome.outcome).toBe('applied');
+    });
+
+    it('holds the lock on the employee, not on the whole queue', async () => {
+      await processor.process(job());
+
+      expect(lock.runExclusively).toHaveBeenCalledWith(
+        'EMP-001',
+        expect.any(Function),
+      );
     });
   });
 
