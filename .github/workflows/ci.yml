@@ -119,6 +119,46 @@ jobs:
             exit 1
           fi
 
+  # Tests whose subject is the SQL itself — row locking, the staleness
+  # predicate, transactional writes — which a mocked repository cannot stand in
+  # for. They need a real Postgres, so they run as their own job.
+  integration:
+    runs-on: ubuntu-latest
+    needs: quality
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: payroll
+          POSTGRES_PASSWORD: payroll
+          POSTGRES_DB: payroll
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U payroll -d payroll"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://payroll:payroll@localhost:5432/payroll
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply migrations
+        run: npm run migration:run
+        working-directory: apps/backend
+
+      - name: Run integration tests
+        run: npm run test:integration
+
   # Deliberately not `needs: quality`. A broken Dockerfile is an independent
   # failure from a lint error, and we want both reported in the same run
   # instead of discovering the second one only after fixing the first.
